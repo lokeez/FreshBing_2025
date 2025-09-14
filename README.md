@@ -4,7 +4,7 @@ pswh.exe must be in exception in Controlled Folder Access settings.
 
 Run script using command:
 
-    "C:\Program Files\PowerShell\7\pwsh.exe" -NoProfile -ExecutionPolicy Bypass -File ".\FreshBing_2025.ps1"
+    pwsh.exe -NoProfile -ExecutionPolicy Bypass -File .\FreshBing_2025.ps1
 
 Original readme:
 
