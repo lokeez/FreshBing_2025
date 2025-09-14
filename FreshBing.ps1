@@ -1,118 +1,118 @@
-# FreshBing
-# https://github.com/ndabas/FreshBing
-#
-# Copyright 2012-2013 Nikhil Dabas
-#
-# Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except
-# in compliance with the License. You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software distributed under the License
-# is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express
-# or implied. See the License for the specific language governing permissions and limitations under
-# the License.
+# FreshBing_2025.ps1
+# PowerShell 7+ required
 
-Param([switch]$autorun)
+$PicturesFolder = [Environment]::GetFolderPath("MyPictures")
+Write-Host "Resolved Pictures folder: $PicturesFolder"
 
-$settingsFile = Join-Path (Split-Path $MyInvocation.MyCommand.Path) "Settings.xml"
-
-# Default values, if a settings file does not exist
-$refreshIntervalDays = 1
-$rssUrl = "http://themeserver.microsoft.com/default.aspx?p=Bing&c=Desktop&m=en-US" 
-
-if (Test-Path $settingsFile) {
-    $settings = [xml](Get-Content $settingsFile)
-    $refreshIntervalDays = $settings.settings.refreshIntervalDays
-    $rssUrl = $settings.settings.rssUrl
+if (-not (Test-Path $PicturesFolder)) {
+    Write-Host "Pictures folder doesn't exist -> creating..."
+    try { New-Item -ItemType Directory -Path $PicturesFolder -Force | Out-Null }
+    catch { Write-Error "Cannot create Pictures folder: $($_.Exception.GetType().FullName) - $($_.Exception.Message)"; return }
 }
 
-$runFile = Join-Path (Split-Path $MyInvocation.MyCommand.Path) "LastRun.xml"
+$selectedFile = Join-Path $PicturesFolder "background.jpg"
+$tempFile = $selectedFile + ".tmp"
 
-# On autorun, only run if it's been more than a day since the last run.
-# We actually check for a 23-hour gap because scheduled tasks are not exactly
-# precise.
-if ($autorun -and (Test-Path $runFile)) {
-    $lastRun = Import-Clixml $runFile
-    $totalHours = 24 * ($refreshIntervalDays - 1) + 23
-    if (((Get-Date) - $lastRun).TotalHours -lt $totalHours) {
-        Write-Warning "Less than $refreshIntervalDays day(s) since the last run - exiting."
-        Return
+# quick write-permission test
+try {
+    $probe = Join-Path $PicturesFolder ("probe_" + [guid]::NewGuid().ToString() + ".tmp")
+    [System.IO.File]::WriteAllText($probe, "ok")  # should create
+    Remove-Item $probe -Force
+    Write-Host "Write test OK in $PicturesFolder"
+}
+catch {
+    Write-Error "Write test FAILED: $($_.Exception.GetType().FullName) - $($_.Exception.Message)"
+    Write-Error "Check permissions, Controlled Folder Access (Windows Security), OneDrive or antivirus."
+    return
+}
+
+# Bing URL (uk-UA)
+$bingUrl = "https://www.bing.com/HPImageArchive.aspx?format=js&idx=0&n=1&mkt=uk-UA"
+
+try {
+    $feed = Invoke-RestMethod -Uri $bingUrl -ErrorAction Stop
+    $imgUrl = "https://www.bing.com" + $feed.images[0].url
+    Write-Host "Image URL: $imgUrl"
+}
+catch {
+    Write-Error "Failed to get Bing feed: $($_.Exception.GetType().FullName) - $($_.Exception.Message)"; return
+}
+
+# Try download via HttpClient -> stream copy -> atomic move
+$downloadSucceeded = $false
+try {
+    Write-Host "Downloading (HttpClient) -> $tempFile"
+    $client = [System.Net.Http.HttpClient]::new()
+    $stream = $client.GetStreamAsync($imgUrl).GetAwaiter().GetResult()
+
+    # open destination temp file for writing (Create, overwrite)
+    $fs = [System.IO.File]::Open($tempFile, [System.IO.FileMode]::Create, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
+    try {
+        $stream.CopyTo($fs)
+    } finally {
+        $fs.Close()
+        $stream.Close()
+        $client.Dispose()
+    }
+
+    $fi = Get-Item $tempFile
+    Write-Host "Downloaded bytes: $($fi.Length)"
+    if ($fi.Length -gt 0) { $downloadSucceeded = $true }
+}
+catch {
+    Write-Warning "HttpClient download failed: $($_.Exception.GetType().FullName) - $($_.Exception.Message)"
+    if (Test-Path $tempFile) { Remove-Item $tempFile -ErrorAction SilentlyContinue }
+}
+
+# Fallback to Invoke-WebRequest if needed
+if (-not $downloadSucceeded) {
+    try {
+        Write-Host "Fallback: Invoke-WebRequest -> $tempFile"
+        Invoke-WebRequest -Uri $imgUrl -OutFile $tempFile -ErrorAction Stop
+        $fi = Get-Item $tempFile
+        Write-Host "Downloaded bytes (fallback): $($fi.Length)"
+        if ($fi.Length -gt 0) { $downloadSucceeded = $true }
+    }
+    catch {
+        Write-Error "Fallback download failed: $($_.Exception.GetType().FullName) - $($_.Exception.Message)"
+        if (Test-Path $tempFile) { Remove-Item $tempFile -ErrorAction SilentlyContinue }
+        return
     }
 }
 
-$feed = [xml](New-Object System.Net.WebClient).DownloadString($rssUrl)
-$base = [Environment]::GetFolderPath("MyPictures")
-$selectedUrl = ""
-$selectedFile = ""
-$oldFile = ""
-
-if (!$feed) {
-    Write-Error "Feed download failed - try again later."
-    Return
-}
-
-# Run through the feed, and find the oldest file that we haven't downloaded yet.
-foreach ($item in $feed.rss.channel.item) {
-    $url = New-Object System.Uri($item.enclosure.url)
-    $file = [System.Uri]::UnescapeDataString($url.Segments[-1])
-    $path = Join-Path $base $file
-    
-    # We have this file, so we need to download the previous file and delete this one
-    if (Test-Path $path) {
-        $oldFile = $path
-        Break
+# Move temp -> final (atomic-ish)
+if ($downloadSucceeded) {
+    try {
+        if (Test-Path $selectedFile) {
+            try { Remove-Item $selectedFile -Force -ErrorAction Stop } catch { Write-Warning "Could not remove existing file: $($_.Exception.Message)" }
+        }
+        Move-Item -Path $tempFile -Destination $selectedFile -Force
+        Write-Host "Saved to $selectedFile"
     }
-    $selectedUrl = $url
-    $selectedFile = $path
+    catch {
+        Write-Error "Move to target failed: $($_.Exception.GetType().FullName) - $($_.Exception.Message)"
+        if (Test-Path $tempFile) { Remove-Item $tempFile -ErrorAction SilentlyContinue }
+        return
+    }
+
+    # set wallpaper
+    Add-Type @"
+using System.Runtime.InteropServices;
+public class Wallpaper {
+    [DllImport("user32.dll", SetLastError = true)]
+    public static extern bool SystemParametersInfo(int uAction, int uParam, string lpvParam, int fuWinIni);
 }
-
-if (!$selectedUrl) {
-    Write-Host "Nothing to download - we already have the newest file."
-    Return
-}
-
-Write-Host "Downloading $selectedUrl -> $selectedFile"
-(New-Object System.Net.WebClient).DownloadFile($selectedUrl, $selectedFile)
-
-if (!(Test-Path $selectedFile)) {
-    Write-Error "Download failed - try again later."
-    Return
-}
-
-Add-Type -Namespace FreshBing -Name UnsafeNativeMethods -MemberDefinition @"
-[DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Auto)]
-public static extern int SystemParametersInfo (int uAction, int uParam, string lpvParam, int fuWinIni);
 "@
-$SPI_SETDESKWALLPAPER = 20
-$SPIF_UPDATEINIFILE = 0x01
-$SPIF_SENDWININICHANGE = 0x02
-$result = [FreshBing.UnsafeNativeMethods]::SystemParametersInfo($SPI_SETDESKWALLPAPER, 0, $selectedFile, $SPIF_UPDATEINIFILE -bor $SPIF_SENDWININICHANGE)
-# This could fail on Windows XP because it does not support jpg wallpapers natively
-if ($result -ne 1) {
-    # Convert the file to a bmp and set that as wallpaper
-    [Reflection.Assembly]::LoadWithPartialName("System.Drawing") | Out-Null
-    
-    $image = [Drawing.Image]::FromFile($selectedFile)
-    $bmpFile = [System.IO.Path]::ChangeExtension($selectedFile, ".bmp")
-    $image.Save($bmpFile, "Bmp")
-    $image.Dispose()
-    
-    [FreshBing.UnsafeNativeMethods]::SystemParametersInfo($SPI_SETDESKWALLPAPER, 0, $bmpFile, $SPIF_UPDATEINIFILE -bor $SPIF_SENDWININICHANGE)
-}
-Set-ItemProperty -path "HKCU:\Control Panel\Desktop\" -name WallpaperStyle -value 2
-Set-ItemProperty -path "HKCU:\Control Panel\Desktop\" -name TileWallpaper -value 0
 
-if ($oldfile -and (Test-Path $oldFile)) {
-    Remove-Item $oldFile
-    Write-Host "Deleting $oldFile"
-    
-    $bmpFile = [System.IO.Path]::ChangeExtension($oldFile, ".bmp")
-    if (Test-Path $bmpFile) {
-        Remove-Item $bmpFile
-        Write-Host "Deleting $bmpFile"
+    $SPI_SETDESKWALLPAPER = 0x0014
+    $UpdateIniFile = 0x01
+    $SendWinIniChange = 0x02
+
+    try {
+        [Wallpaper]::SystemParametersInfo($SPI_SETDESKWALLPAPER, 0, $selectedFile, $UpdateIniFile -bor $SendWinIniChange) | Out-Null
+        Write-Host "✅ Wallpaper updated successfully!"
+    }
+    catch {
+        Write-Warning "Wallpaper set failed: $($_.Exception.GetType().FullName) - $($_.Exception.Message)"
     }
 }
-
-# Save this run time
-Get-Date | Export-Clixml $runFile
