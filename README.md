@@ -1,4 +1,5 @@
-Rewrited script, PowerShell 7+ required
+Rewrited script, PowerShell 7+ required.
+
 pswh.exe must be in exception in Controlled Folder Access settings.
 
 Run script using command:
